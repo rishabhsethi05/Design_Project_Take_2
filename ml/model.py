@@ -1,25 +1,36 @@
-class CheckpointRiskModel:
-    """
-    Trained Model Weights for CRC Algorithm.
-    Derived from 10,000 Monte Carlo execution trials.
-    """
-    # HARDCODED OPTIMIZED WEIGHTS
-    W_LOOP = 3.0
-    W_COMPLEXITY = 9.0
+import math
+from ml.model import CheckpointRiskModel  # Import your hardcoded weights
 
-    @staticmethod
-    def calculate_risk(loop_depth, cyclomatic_complexity, failure_rate, cp_cost):
-        """
-        The core Risk Equation used during the 'ml_adaptive' strategy.
-        """
-        # Feature scoring
-        loop_score = loop_depth * CheckpointRiskModel.W_LOOP
 
-        # Scaling complexity so it doesn't overwhelm the loop depth
-        complexity_score = cyclomatic_complexity * CheckpointRiskModel.W_COMPLEXITY * 0.02
+class DecisionEngine:
+    def __init__(self, structural_metrics: dict):
+        self.metrics = structural_metrics
+        # Move the weights into the RiskModel structure
+        self.bias = -3.5  # Adjusted for the new scaling
 
-        # Accounting for environmental volatility
-        env_stress = failure_rate * cp_cost * 5
+    def evaluate(self, work_since_last_checkpoint: float, failure_rate: float, current_line_cost: float):
+        # 1. Get structural context
+        loop_depth = self.metrics.get('loop_count', 0)
+        complexity = self.metrics.get('cyclomatic_complexity', 1)
 
-        # Sum represents the total risk of NOT checkpointing at this instruction
-        return loop_score + complexity_score + env_stress
+        # 2. Use your Model.py math
+        # We pass a generic cp_cost estimate of 0.01 if not provided
+        structural_risk = CheckpointRiskModel.calculate_risk(
+            loop_depth=loop_depth,
+            cyclomatic_complexity=complexity,
+            failure_rate=failure_rate,
+            cp_cost=0.01
+        )
+
+        # 3. Time Risk (The "Accumulated Pain")
+        # We multiply structural risk by work done so we don't save 
+        # at the very start of a loop.
+        time_factor = work_since_last_checkpoint * 850.0
+
+        # 4. Final Logistic Score
+        score = self.bias + time_factor + structural_risk
+
+        capped_score = max(min(score, 20), -20)
+        probability = 1 / (1 + math.exp(-capped_score))
+
+        return score > 0, probability

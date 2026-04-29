@@ -75,7 +75,7 @@ int i, iCost, iDist;
 
 #include <stddef.h>
 
-#define QHEAP_SIZE (8192 / sizeof (QITEM))
+#define QHEAP_SIZE (32768 / sizeof (QITEM)) // Was 8192 (4x increase)
 static QITEM qheap[QHEAP_SIZE];
 static QITEM *qfree_list;
 
@@ -236,20 +236,21 @@ initialise_benchmark (void)
 
 
 int benchmark() {
-   int i,j;
-
+   int i, j, k;
    output_count = 0;
 
-   /* finds 10 shortest paths between nodes */
-   for(j = 0; j < NUM_NODES; j++) {
-      for (i=0; i < NUM_NODES; i++) {
-         output[output_count] = dijkstra(i,j);
-         output_count++;
+   /* Finds shortest paths between nodes repeatedly to scale runtime */
+   for(k = 0; k < 25; k++) {
+      for(j = 0; j < NUM_NODES; j++) {
+         for (i=0; i < NUM_NODES; i++) {
+            output[output_count % (NUM_NODES * NUM_NODES)] = dijkstra(i, j);
+            output_count++;
+         }
       }
    }
-
    return 0;
 }
+
 
 int verify_benchmark(int unused) {
    int expected[] = {0, 7, 38, 23, 14, 36, 3, 29, 7, 14, 28, 0, 31, 16, 7, 34,

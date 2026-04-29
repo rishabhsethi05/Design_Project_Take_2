@@ -2,10 +2,11 @@ import pandas as pd
 import numpy as np
 import random
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 from execution.experiment_runner import build_cfg_from_c
 from checkpointing.execution_context import ExecutionContext
 from execution.cfg_execution_engine import CFGExecutionEngine
-
+import seaborn as sns
 
 def run_weight_optimization(c_file, trials=1000):
     blocks, _, metrics = build_cfg_from_c(c_file, verbose=False)
@@ -53,7 +54,7 @@ def run_weight_optimization(c_file, trials=1000):
 
 if __name__ == "__main__":
     # 1. Generate the data
-    df_results = run_weight_optimization("sample_programs/crc.c", trials=2000)
+    df_results = run_weight_optimization("input_programs/sample_crc.c", trials=2000)
 
     # 2. Immediately generate the Heatmap (Paste your code here)
     print("📊 Generating Heatmap...")

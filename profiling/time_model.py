@@ -3,66 +3,61 @@ import statistics
 
 class TimeModel:
     """
-    Advanced Instruction-Level Time Model.
-
-    Functions:
-    1. Tracks execution time at the Basic Block level.
-    2. Derived 'Average Time Per Line' for granular checkpointing.
-    3. Handles RDTSC cycle counts (or high-res nanoseconds).
+    Balanced Instruction-Level Time Model.
+    Updated to provide non-uniform line costs to guide ML decisions.
     """
 
-    def __init__(self, alpha=0.7):
-        """
-        alpha: Smoothing factor for Moving Average (higher = trust new data more).
-        """
+    def __init__(self, alpha=0.4):  # Slightly lower alpha for better stability
         self.alpha = alpha
-
-        # Mapping: block_id -> { 'avg_total_time': float, 'line_count': int }
         self.block_history = {}
-
-        # Mapping: line_number -> average_execution_time (The "Goal" metric)
         self.line_timing_map = {}
+        self.MIN_LINE_COST = 0.0001
 
     def update_block_metrics(self, block_id: int, measured_time: float, lines: list):
-        """
-        Updates the model with a fresh measurement from the profiler.
-        Calculates the new 'Average Time Per Line' for that block.
-        """
         line_count = len(lines)
         if line_count == 0:
             return
 
-        # 1. Update the Block's mean time using an Exponential Moving Average
+        # Ensure we don't drop below a realistic threshold for the hardware
+        measured_time = max(measured_time, 0.0005)
+
+        # Exponential Moving Average (EMA) for block history
         if block_id not in self.block_history:
             self.block_history[block_id] = measured_time
         else:
-            self.block_history[block_id] = (self.alpha * measured_time) + \
-                                           ((1 - self.alpha) * self.block_history[block_id])
+            self.block_history[block_id] = (
+                    self.alpha * measured_time +
+                    (1 - self.alpha) * self.block_history[block_id]
+            )
 
-        # 2. Calculate Average Time Per Line for this specific block
-        avg_line_time = self.block_history[block_id] / line_count
+        # Distribute costs based on line "weight"
+        # Logic: Lines with more characters or complex operators (*, ^, <<) cost more
+        total_weight = 0
+        weights = []
+        for entry in lines:
+            code = str(entry[1]).lower()
+            # Heuristic: Assign weight based on complexity
+            weight = 1.0
+            if any(op in code for op in ['^', '<<', '>>', '*', '/']):
+                weight = 1.5
+            if any(op in code for op in ['[', '->', '.']):
+                weight = 1.2  # Memory access penalty
 
-        # 3. Map this timing to every line within the block
-        # This satisfies Point #3 & #6 from your professor's list
-        for line_num, _ in lines:
-            self.line_timing_map[line_num] = avg_line_time
+            weights.append(weight)
+            total_weight += weight
+
+        # Apply the weighted distribution to the total block time
+        for i, entry in enumerate(lines):
+            line_num = entry[0]
+            share = weights[i] / total_weight
+            line_cost = (self.block_history[block_id] * share)
+            self.line_timing_map[line_num] = max(line_cost, self.MIN_LINE_COST)
 
     def get_line_cost(self, line_number: int) -> float:
-        """
-        Returns the estimated time/cycles for a specific line.
-        Default return is a small epsilon if the line hasn't been profiled yet.
-        """
-        return self.line_timing_map.get(line_number, 0.000001)
+        return self.line_timing_map.get(line_number, self.MIN_LINE_COST)
 
     def predict_region_cost(self, line_numbers: list) -> float:
-        """
-        Predicts the total execution time for a sequence of lines.
-        Used by the ML model to decide 'Risk of Recomputation'.
-        """
         return sum(self.get_line_cost(ln) for ln in line_numbers)
 
     def get_total_execution_estimate(self) -> float:
-        """
-        Point #1: Sum of all known block timings to provide Total Execution Time.
-        """
         return sum(self.block_history.values())

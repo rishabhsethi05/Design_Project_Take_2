@@ -81,7 +81,8 @@ typedef unsigned char uchar;
 #define LOBYTE(x) ((uchar)((x) & 0xFF))
 #define HIBYTE(x) ((uchar)((x) >> 8))
 
-const unsigned char lin[256] = "asdffeagewaHAFEFaeDsFEawFdsFaefaeerdjgp";
+// Increase buffer to 2048 to give the simulator a large "Static" footprint
+const unsigned char lin[2048] = "asdffeagewaHAFEFaeDsFEawFdsFaefaeerdjgp";
 
 unsigned short icrc1(unsigned short crc, unsigned char onech)
 {
@@ -163,12 +164,13 @@ int benchmark(void)
   unsigned short i1,i2;
   unsigned long n;
 
-  n=40;
-  i1=icrc(0,n,(short)0,1);
-  i2=icrc(i1,n+2,(short)0,1);
+  // We increase n to 2000.
+  // This makes the internal 'for (j=1;j<=len;j++)' loop in icrc run 2000 times.
+  n=2000;
 
-  /* Silence compiler warning about unused variables.  */
+  i1=icrc(0, n, (short)0, 1);
+  i2=icrc(i1, n+2, (short)0, 1);
+
   (void) i2;
-
   return 0;
 }

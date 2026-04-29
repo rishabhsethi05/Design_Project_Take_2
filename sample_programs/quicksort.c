@@ -73,14 +73,12 @@
 
 #define SWAP(a,b) temp=(a);(a)=(b);(b)=temp;
 #define M 7
-#define NSTACK 50
+#define NSTACK 200 // Increased from 50
 
-float arr[20] = {
-  5, 4, 10.3, 1.1, 5.7, 100, 231, 111, 49.5, 99,
-  10, 150, 222.22, 101, 77, 44, 35, 20.54, 99.99, 88.88
-};
+// Expand the array to 256 elements to increase memory pressure
+float arr[256];
 
-int istack[100];
+int istack[NSTACK]; // Dynamically uses the 200 we defined
 
 void sort(unsigned long n)
 {
@@ -155,10 +153,19 @@ initialise_benchmark (void)
 {
 }
 
-
-int
-benchmark()
+int benchmark()
 {
-  sort(20);
+  int k, idx;
+
+  // Outer loop to scale execution time (The "n=2000" equivalent)
+  for (k = 0; k < 100; k++) {
+
+     // Re-initialize array with some dummy data so it's not already sorted
+     for (idx = 0; idx < 256; idx++) {
+        arr[idx] = (float)((idx * 7) % 100);
+     }
+
+     sort(255); // Sort the 256 elements
+  }
   return 0;
 }

@@ -3,131 +3,77 @@ import time
 from profiling.execution_profiler import ExecutionProfiler
 from profiling.time_model import TimeModel
 
-class CFGExecutionEngine:
-    """
-    The 'Heart' of the simulator.
-    Steps through Basic Blocks and individual lines to simulate
-    real-world hardware execution and checkpointing.
-    Now enhanced for Triple-Pass Comparison (Periodic vs Young's vs ML).
-    """
 
+class CFGExecutionEngine:
     def __init__(self, blocks, context):
-        """
-        blocks: dictionary {block_id: BasicBlock}
-        context: The ExecutionContext (manages failures and saves)
-        """
         self.blocks = blocks
         self.context = context
         self.current_block_id = 0
-
-        # Profiling + time modeling
         self.profiler = ExecutionProfiler()
         self.time_model = TimeModel()
-
-        # Expose profiler to context
         self.context.profiler = self.profiler
-
-        # Track visit counts for state size estimation and loop detection
         self.visited_counts = {block_id: 0 for block_id in blocks.keys()}
         self.simulated_stack_depth = 0
 
-    # --------------------------------------------------
-    # SUCCESSOR SELECTION
-    # --------------------------------------------------
-
     def choose_successor(self, block):
-        if not block.successors:
-            return None
-
-        num_successors = len(block.successors)
-        if num_successors == 1:
-            return block.successors[0]
-
-        # Dynamic weighting for branching (preserved from original)
-        primary_weight = 0.7
-        others_weight = 0.3 / (num_successors - 1)
-        weights = [primary_weight] + [others_weight] * (num_successors - 1)
-
-        return random.choices(block.successors, weights=weights, k=1)[0]
-
-    # --------------------------------------------------
-    # DYNAMIC STATE SIZE MODEL
-    # --------------------------------------------------
+        if not block.successors: return None
+        return block.successors[0] if len(block.successors) == 1 else random.choice(block.successors)
 
     def compute_dynamic_state_size(self, block_id):
-        unique_blocks_visited = sum(1 for count in self.visited_counts.values() if count > 0)
-        loop_depth_factor = self.visited_counts[block_id]
-
-        return (
-                len(self.blocks)
-                + unique_blocks_visited
-                + loop_depth_factor
-                + self.simulated_stack_depth
-        )
-
-    # --------------------------------------------------
-    # EXECUTION LOOP (Triple-Pass Aware)
-    # --------------------------------------------------
+        unique_blocks_visited = sum(1 for c in self.visited_counts.values() if c > 0)
+        return len(self.blocks) + unique_blocks_visited + self.visited_counts[block_id] + self.simulated_stack_depth
 
     def execute(self, max_steps=10000):
-        """
-        The main loop that steps through the program structure.
-        Supports Periodic, Analytical (Young's), and ML Adaptive strategies.
-        """
-        # Determine verbosity: Only ML strategy shows line-level logs
-        # This keeps the comparison table clean as per your request.
-        verbose = (self.context.strategy == "ml_adaptive")
+        verbose = (self.context.strategy in ["ml_adaptive", "hybrid"])
         steps = 0
 
         while steps < max_steps:
             block = self.blocks[self.current_block_id]
+            self.profiler.start_block(str(self.current_block_id))
             self.visited_counts[self.current_block_id] += 1
 
-            # --- 1. PROFILING THE BLOCK ---
-            # Measure actual CPU time elapsed for this block
+            # 1. Simulate Block Execution Time
             start_time = time.perf_counter()
+            time.sleep(0.02 * len(block.lines) * random.uniform(0.8, 1.2))
+            measured_duration = time.perf_counter() - start_time
 
-            # Simulated hardware latency (Preserved: 0.005s per block)
-            time.sleep(0.005)
+            self.time_model.update_block_metrics(self.current_block_id, measured_duration, block.lines)
 
-            end_time = time.perf_counter()
-            measured_duration = end_time - start_time
+            # 2. Line-by-Line Execution
+            for entry in block.lines:
+                line_num, line_code = entry[0], entry[1]
+                reads = entry[2] if len(entry) == 4 else 0
+                writes = entry[3] if len(entry) == 4 else 0
 
-            # --- 2. UPDATE TIME MODEL ---
-            # Calibrate line-level timing based on the block measurement
-            self.time_model.update_block_metrics(
-                block_id=self.current_block_id,
-                measured_time=measured_duration,
-                lines=block.lines
-            )
-
-            # --- 3. LINE-BY-LINE EXECUTION ---
-            for line_num, line_code in block.lines:
-                # Get instruction cost from the time model
+                self.context.add_memory_access(reads, writes)
                 line_cost = self.time_model.get_line_cost(line_num)
-
-                # IMPORTANT: Commit work to context.
-                # This allows the simulator to trigger random failures based on λ.
                 self.context.add_work(line_cost)
 
-                # Evaluate Checkpoint decision based on current strategy (ML, Periodic, or Young's)
-                dynamic_state_size = self.compute_dynamic_state_size(self.current_block_id)
+                # Unified Strategy Trigger
+                # We calculate lookahead (stall_hint) and let the Policy decide
+                state_map = {str(bid): self.compute_dynamic_state_size(bid) for bid in self.blocks}
+                predicted_cost = self.profiler.predict_next_state_cost(str(self.current_block_id), state_map)
 
-                # Evaluate decision (The context handles the different strategy math)
+                # Stall hint: Is the next state significantly cheaper?
+                dynamic_state_size = self.compute_dynamic_state_size(self.current_block_id)
+                stall_hint = predicted_cost < (dynamic_state_size * 0.85)
+
+                # THE KEY FIX: One call to rule them all.
+                # This respects the strategy set in ExecutionContext.
                 self.context.evaluate_checkpoint(
-                    event_type=f"Line {line_num}: {line_code.strip()}",
+                    event_type=f"Line {line_num}",
                     state_size=dynamic_state_size,
                     current_line_cost=line_cost,
-                    verbose=verbose # Only prints if it's the ML run
+                    verbose=verbose,
+                    stall_hint=stall_hint
                 )
 
-            # --- 4. TRANSITION TO NEXT BLOCK ---
+            # 3. Handle Transitions
+            self.profiler.end_block(str(self.current_block_id))
             next_block_id = self.choose_successor(block)
+            if next_block_id is None: break
 
-            if next_block_id is None:
-                break
-
-            # Heuristic for stack depth tracking (Preserved)
+            # Stack depth simulation for state size
             last_line = block.lines[-1][1].strip()
             if "return" in last_line and self.simulated_stack_depth > 0:
                 self.simulated_stack_depth -= 1
@@ -137,8 +83,12 @@ class CFGExecutionEngine:
             self.current_block_id = next_block_id
             steps += 1
 
-        # Final Summary (Only for the ML run to avoid clutter)
-        if verbose:
-            final_time = self.time_model.get_total_execution_estimate()
-            print(f"\n[Engine] {self.context.strategy.upper()} Pass Complete.")
-            print(f"[Engine] Estimated Hardware Time: {final_time:.6f}s")
+        if verbose: self._report_stats()
+
+    def _report_stats(self):
+        final_time = self.time_model.get_total_execution_estimate()
+        print(f"\n[Engine] {self.context.strategy.upper()} Pass Complete.")
+        print(f"[Engine] Estimated Hardware Time: {final_time:.6f}s")
+        print(f"[Memory] Total Reads: {self.context.total_reads} | Writes: {self.context.total_writes}")
+        ratio = self.context.total_reads / (self.context.total_writes or 1)
+        print(f"[Memory] Read/Write Ratio: {ratio:.2f}")

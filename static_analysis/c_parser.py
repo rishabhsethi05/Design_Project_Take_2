@@ -4,175 +4,137 @@ from typing import Dict, List, Tuple
 
 class CAlgorithmParser:
     """
-    Structural static analysis for C algorithm files.
-
-    Provides:
-    - Algorithm metadata
-    - Line-level representation
-    - Cleaned source lines
-    - Structural metrics
-
-    This is not a full compiler.
-    It is a controlled static analysis layer for checkpoint research.
+    Hardware-Aware Parser for C algorithms.
+    Calculates Clock Cycles and Energy Depletion based on MSP430FR6989 (16MHz) specs.
     """
+
+    # MSP430 / Mapi-Pro Paper Constants
+    CLOCK_FREQ_MHZ = 16
+    T_CYCLE_SEC = 1 / (CLOCK_FREQ_MHZ * 10 ** 6)
+
+    # Energy in Nanojoules (nJ) - Derived from paper Section 3.1
+    E_SRAM_READ = 5.50  # nJ
+    E_SRAM_WRITE = 5.60  # nJ
+    E_LOGIC_OP = 2.10  # nJ (CPU Baseline per cycle)
+
+    # Checkpointing Costs (FRAM)
+    E_FRAM_WRITE_BYTE = 13.125  # nJ per byte
+
+    LOOP_ITERATION_FACTOR = 10000
 
     def __init__(self, file_path: str):
         self.file_path = file_path
         self.source_code = ""
         self.cleaned_lines: List[Tuple[int, str]] = []
+        self.memory_lines: List[Dict] = []
         self.analysis: Dict = {}
-
-    # ==========================================================
-    # LOAD FILE
-    # ==========================================================
 
     def load(self):
         with open(self.file_path, "r") as f:
             self.source_code = f.read()
-
         self._preprocess()
-
-    # ==========================================================
-    # PREPROCESSING
-    # ==========================================================
+        self._attach_hardware_model()  # Changed from memory_model to hardware_model
 
     def _preprocess(self):
-        """
-        Removes comments and prepares line-level representation.
-        """
-
-        code = self._remove_comments(self.source_code)
-
-        lines = code.split("\n")
-
+        clean_code = re.sub(r"/\*.*?\*/", "", self.source_code, flags=re.DOTALL)
+        clean_code = re.sub(r"//.*", "", clean_code)
         self.cleaned_lines = []
-
-        for idx, line in enumerate(lines, start=1):
+        lines = clean_code.split("\n")
+        for i, line in enumerate(lines, 1):
             stripped = line.strip()
-            if stripped == "":
-                continue
-            self.cleaned_lines.append((idx, stripped))
+            if stripped and any(c in stripped for c in ['#', '{', '}', ';', '=', '(', ')']):
+                self.cleaned_lines.append((i, stripped))
 
-    def _remove_comments(self, code: str) -> str:
-        # Remove block comments
-        code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
-        # Remove single-line comments
-        code = re.sub(r"//.*", "", code)
-        return code
+    def _attach_hardware_model(self):
+        """
+        Calculates cycles and energy depletion for every line.
+        Satisfies professor's requirement for 'Energy depletion per clock cycle'.
+        """
+        loop_depth = 0
+        self.memory_lines = []
 
-    # ==========================================================
-    # MAIN ANALYSIS
-    # ==========================================================
+        for line_num, line in self.cleaned_lines:
+            is_loop_head = bool(re.search(r"\b(for|while)\b", line))
+            if is_loop_head:
+                loop_depth += 1
 
-    def analyze(self):
-        if not self.source_code:
-            raise ValueError("Source code not loaded.")
+            # Get hardware metrics
+            reads, writes, cycles = self._calculate_line_metrics(line)
 
-        self.analysis["algorithm"] = self._detect_algorithm()
-        self.analysis["loop_count"] = self._count_loops()
-        self.analysis["function_count"] = self._count_functions()
-        self.analysis["uses_recursion"] = self._detect_recursion()
-        self.analysis["line_count"] = len(self.cleaned_lines)
+            # Calculate energy based on Professor's formula: E = P * t
+            # Or specifically: E = (Reads * E_read) + (Writes * E_write) + (LogicCycles * E_logic)
+            line_energy = (reads * self.E_SRAM_READ) + (writes * self.E_SRAM_WRITE) + (cycles * self.E_LOGIC_OP)
 
-        return self.analysis
+            scale = self.LOOP_ITERATION_FACTOR if loop_depth > 0 else 1
 
-    # ==========================================================
-    # DETECTION LOGIC
-    # ==========================================================
+            self.memory_lines.append({
+                "line_no": line_num,
+                "code": line,
+                "reads": reads * scale,
+                "writes": writes * scale,
+                "cycles": cycles * scale,
+                "energy_nJ": line_energy * scale,
+                "in_loop": loop_depth > 0
+            })
+
+            if (";" in line and not is_loop_head and loop_depth > 0) or "}" in line:
+                loop_depth = max(0, loop_depth - 1)
+
+    def _calculate_line_metrics(self, line: str) -> Tuple[int, int, int]:
+        """
+        Returns (Reads, Writes, Total Cycles) for a given C line.
+        Based on MSP430 Instruction Set Architecture.
+        """
+        line = line.replace(";", "").strip()
+        reads = 0
+        writes = 0
+        cycles = 1  # Every line takes at least 1 fetch cycle
+
+        # 1. Detect Memory Operations
+        if "=" in line and not any(k in line for k in ["if", "while", "for"]):
+            lhs, rhs = line.split("=", 1)
+            # LHS is usually a write
+            writes += 1
+            # RHS variables are reads
+            reads += len(re.findall(r"\b[a-zA-Z_]\w*\b", rhs))
+            # Array accesses add overhead (address calculation)
+            cycles += line.count("[") * 2
+
+            # 2. Logic and Bitwise (CRC specific)
+        if any(op in line for op in ["^", "<<", ">>", "&", "|"]):
+            cycles += 1  # Bitwise ops are usually 1 cycle on MSP430
+
+        # 3. Conditionals
+        if re.search(r"\b(if|while|for)\b", line):
+            vars_in_cond = re.findall(r"\b[a-zA-Z_]\w*\b", line)
+            reads += len([v for v in vars_in_cond if v not in ["if", "while", "for"]])
+            cycles += 1  # Branching overhead
+
+        return reads, writes, cycles
 
     def _detect_algorithm(self):
         code = self.source_code.lower()
-
-        # We use a scoring system to see which 'Signature' is strongest
-        scores = {
-            "quicksort": 0,
-            "dijkstra": 0,
-            "crc": 0
+        markers = {
+            "CRC": [r"0x[0-9a-f]{4}", r"\^=", r"<<", r"icrctb"],
+            "QUICKSORT": [r"partition", r"pivot", r"swap\(", r"istack"],
+            "DIJKSTRA": [r"adjmatrix", r"idist", r"num_nodes"]
         }
+        scores = {algo: sum(2 for p in patterns if re.search(p, code)) for algo, patterns in markers.items()}
+        best_algo = max(scores, key=scores.get)
+        return best_algo if scores[best_algo] >= 4 else "UNKNOWN"
 
-        # --- QUICKSORT SIGNATURES ---
-        # Look for pivot logic, partitioning, or stack management
-        qsort_keywords = ["partition", "pivot", "quicksort", "stack", "istack", "swap"]
-        for word in qsort_keywords:
-            if word in code: scores["quicksort"] += 2
-
-        # Structural Signature: Pivot calculation (index shifting)
-        if ">> 1" in code or "+ ir) / 2" in code:
-            scores["quicksort"] += 5
-        # Array element swapping pattern
-        if "arr[i]" in code and "arr[j]" in code and "temp" in code:
-            scores["quicksort"] += 3
-
-        # --- DIJKSTRA SIGNATURES ---
-        # Look for graph traversal and distance arrays
-        dijkstra_keywords = ["dijkstra", "priority_queue", "dist", "visited", "min_dist", "graph", "vertex"]
-        for word in dijkstra_keywords:
-            if word in code: scores["dijkstra"] += 2
-
-        # Structural Signature: Relaxation Step (dist[u] + weight < dist[v])
-        if "dist[" in code and ("+" in code or "<" in code):
-            scores["dijkstra"] += 5
-        # Infinity constant often used in Dijkstra
-        if "9999" in code or "int_max" in code or "inf" in code:
-            scores["dijkstra"] += 3
-
-        # --- CRC SIGNATURES ---
-        # Look for polynomial math and bit-shifting
-        crc_keywords = ["crc", "polynomial", "poly", "bit", "width", "check"]
-        for word in crc_keywords:
-            if word in code: scores["crc"] += 2
-
-        # Structural Signature: The CRC Polynomial math (XOR and Left Shift)
-        if "^" in code and "<<" in code:
-            scores["crc"] += 5
-        # Common CRC constants (Hexadecimal signatures)
-        if any(h in code for h in ["0x8000", "0x1021", "0xedb8", "0x4129"]):
-            scores["crc"] += 5
-
-        # Determine the winner
-        best_match = max(scores, key=scores.get)
-
-        # Fallback if no score is high enough
-        if scores[best_match] < 3:
-            return "unknown"
-
-        return best_match
-
-    def _count_loops(self):
-        return len(re.findall(r"\bfor\b|\bwhile\b", self.source_code))
-
-    def _count_functions(self):
-        # Slightly improved function detection
-        return len(
-            re.findall(
-                r"\b(int|void|float|double|char|long|short)\s+\w+\s*\(",
-                self.source_code,
-            )
-        )
-
-    def _detect_recursion(self):
-        functions = re.findall(
-            r"\b(int|void|float|double|char|long|short)\s+(\w+)\s*\(",
-            self.source_code,
-        )
-
-        for _, func_name in functions:
-            pattern = rf"\b{func_name}\s*\("
-            occurrences = len(re.findall(pattern, self.source_code))
-            if occurrences > 1:
-                return True
-
-        return False
-
-    # ==========================================================
-    # PROGRAM REPRESENTATION FOR CFG / BLOCK BUILDER
-    # ==========================================================
+    def analyze(self):
+        self.analysis.update({
+            "algorithm": self._detect_algorithm(),
+            "total_cycles": sum(m['cycles'] for m in self.memory_lines),
+            "total_energy_nJ": sum(m['energy_nJ'] for m in self.memory_lines),
+            "line_count": len(self.cleaned_lines)
+        })
+        return self.analysis
 
     def get_program_representation(self) -> Dict:
-        """
-        Returns structured representation for downstream analysis.
-        """
         return {
             "lines": self.cleaned_lines,
-            "analysis": self.analysis,
+            "memory_lines": self.memory_lines,
+            "analysis": self.analysis
         }
